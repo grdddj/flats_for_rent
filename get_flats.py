@@ -141,7 +141,7 @@ def get_flat_from_html(flat_html: str) -> Flat:
             get_value_after_label("terasa/balkón/předzahrádka (m2)") or ""
         ),
         furnished=get_value_after_label("vybavený") == "ANO",
-        reserved=get_value_after_label("stav") == "Rezervováno",
+        reserved=get_value_after_label("stav") in ["Rezervováno", "Pronajatý"],
     )
 
 
