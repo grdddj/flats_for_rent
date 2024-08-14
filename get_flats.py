@@ -1,8 +1,10 @@
 import json
 import re
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
@@ -22,6 +24,11 @@ if not DIFFS_DIR.exists():
 
 URL_TEMPLATE = "https://www.deltahagibor.cz/seznam-bytu?1699092a_page={}"
 
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
+)
+
 logger = get_json_logger(HERE / "get_flats.log")
 
 
@@ -35,7 +42,7 @@ class Flat:
     size: float
     balcony_size: float
     furnished: bool
-    reserved: bool
+    reserved: str
 
     def __eq__(self, value: object) -> bool:
         if not isinstance(value, Flat):
@@ -48,11 +55,31 @@ class FlatDifference:
     old: Flat | None
     new: Flat | None
 
+    def get_diff(self) -> dict[str, Any] | None:
+        if self.old is None and self.new is None:
+            return None
+
+        if self.old is None and self.new is not None:
+            return asdict(self.new)
+
+        if self.new is None and self.old is not None:
+            return asdict(self.old)
+
+        assert self.old is not None and self.new is not None
+
+        diff = {}
+        for key, value in asdict(self.new).items():
+            if asdict(self.old).get(key) != value:
+                diff[key] = value
+        return diff
+
 
 def save_new_file(flats: list[Flat]) -> None:
     now_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     file_path = DATA_DIR / f"{now_ts}.json"
-    file_path.write_text(json.dumps([asdict(flat) for flat in flats], indent=2))
+    file_path.write_text(
+        json.dumps([asdict(flat) for flat in flats], indent=2, ensure_ascii=False)
+    )
 
 
 def save_last_differences(differences: list[FlatDifference]) -> None:
@@ -60,7 +87,17 @@ def save_last_differences(differences: list[FlatDifference]) -> None:
         return
     now_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     file_path = DIFFS_DIR / f"{now_ts}.json"
-    file_path.write_text(json.dumps([asdict(diff) for diff in differences], indent=2))
+    diffs = []
+    for diff in differences:
+        obj = {
+            "old": asdict(diff.old) if diff.old is not None else None,
+            "new": asdict(diff.new) if diff.new is not None else None,
+        }
+        diff_dict = diff.get_diff()
+        if diff_dict is not None:
+            obj["diff"] = diff_dict
+        diffs.append(obj)
+    file_path.write_text(json.dumps(diffs, indent=2, ensure_ascii=False))
 
 
 def get_last_flats() -> list[Flat]:
@@ -141,7 +178,7 @@ def get_flat_from_html(flat_html: str) -> Flat:
             get_value_after_label("terasa/balkón/předzahrádka (m2)") or ""
         ),
         furnished=get_value_after_label("vybavený") == "ANO",
-        reserved=get_value_after_label("stav") in ["Rezervováno", "Pronajatý"],
+        reserved=get_value_after_label("stav") or "",
     )
 
 
@@ -152,32 +189,62 @@ def take_numbers_from_beginning(text: str) -> int | None:
     return int(result.group())
 
 
-def get_flats() -> list[Flat]:
+def get_flats(
+    last_index: int, sleep: float = 1, allowed_no_flats: int = 3
+) -> list[Flat]:
     parent_div_name = "seznam-bytu-grid"
     flats_data = []
-    for index in range(1, 9):
+    index = 1
+    no_flats = 0
+    while index <= last_index:
+        time.sleep(sleep)
         url = URL_TEMPLATE.format(index)
-        page = requests.get(url)
+        page = requests.get(url, headers={"User-Agent": USER_AGENT})
         soup = BeautifulSoup(page.content, "html.parser")
 
         flats = soup.find_all("div", class_=parent_div_name)
+        logger.info({"event": "Flats", "index": index, "flats": len(flats)})
+        if not flats:
+            logger.warning({"event": "NoFlats", "index": index})
+            time.sleep(sleep)
+            no_flats += 1
+            if no_flats >= allowed_no_flats:
+                logger.warning(
+                    {
+                        "event": "NoFlatsLimit",
+                        "index": index,
+                        "allowed_no_flats": allowed_no_flats,
+                    }
+                )
+                index += 1
+                no_flats = 0
+            continue
+
+        no_flats = 0
 
         for flat_html in flats[1:]:
             flat = get_flat_from_html(str(flat_html))
             flats_data.append(flat)
+
+        index += 1
+
     return flats_data
 
 
 def main():
-    logger.info({"event": "Start"})
-    flats = get_flats()
+    settings = {
+        "last_index": 8,
+        "sleep": 2,
+    }
+    logger.info({"event": "Start", "settings": settings})
+    flats = get_flats(**settings)
     logger.info({"event": "NewFlats", "flats": len(flats)})
     save_new_file(flats)
     differences = get_difference_from_last_two_data()
     logger.info(
         {
             "event": "Differences",
-            "differences": [asdict(diff) for diff in differences],
+            "differences": len(differences),
         }
     )
     if differences:
