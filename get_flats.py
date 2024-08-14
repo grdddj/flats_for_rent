@@ -189,52 +189,73 @@ def take_numbers_from_beginning(text: str) -> int | None:
     return int(result.group())
 
 
-def get_flats(
-    last_index: int, sleep: float = 1, allowed_no_flats: int = 3
-) -> list[Flat]:
+def get_flats_from_url(url: str) -> list[Flat] | None:
+    page = requests.get(url, headers={"User-Agent": USER_AGENT})
+    soup = BeautifulSoup(page.content, "html.parser")
+
     parent_div_name = "seznam-bytu-grid"
-    flats_data = []
-    index = 1
-    no_flats = 0
-    while index <= last_index:
-        time.sleep(sleep)
+    flats = soup.find_all("div", class_=parent_div_name)
+
+    if not flats:
+        return None
+
+    # There is one row with a header/titles
+    real_flats = flats[1:]
+    return [get_flat_from_html(str(flat_html)) for flat_html in real_flats]
+
+
+def get_flats_on_index(
+    index: int, max_tries: int, sleep_in_between: float
+) -> list[Flat] | None:
+    tries = 0
+
+    while tries < max_tries:
         url = URL_TEMPLATE.format(index)
-        page = requests.get(url, headers={"User-Agent": USER_AGENT})
-        soup = BeautifulSoup(page.content, "html.parser")
+        flats = get_flats_from_url(url)
 
-        flats = soup.find_all("div", class_=parent_div_name)
-        logger.info({"event": "Flats", "index": index, "flats": len(flats)})
-        if not flats:
-            logger.warning({"event": "NoFlats", "index": index})
-            time.sleep(sleep)
-            no_flats += 1
-            if no_flats >= allowed_no_flats:
-                logger.warning(
-                    {
-                        "event": "NoFlatsLimit",
-                        "index": index,
-                        "allowed_no_flats": allowed_no_flats,
-                    }
-                )
-                index += 1
-                no_flats = 0
-            continue
+        if flats:
+            logger.info({"event": "Flats", "index": index, "flats": len(flats)})
+            return flats
 
-        no_flats = 0
+        logger.warning({"event": "NoFlats", "index": index})
+        if tries < max_tries:
+            time.sleep(sleep_in_between)
+        tries += 1
 
-        for flat_html in flats[1:]:
-            flat = get_flat_from_html(str(flat_html))
-            flats_data.append(flat)
+    logger.warning(
+        {
+            "event": "NoFlatsLimit",
+            "index": index,
+            "tries": max_tries,
+        }
+    )
+    return None
 
-        index += 1
+
+def get_flats_indexes(indexes: list[int], sleep: float, max_retries: int) -> list[Flat]:
+    flats_data = []
+    for index in indexes:
+        time.sleep(sleep)
+        flats = get_flats_on_index(index, max_retries, sleep * 2)
+        if flats:
+            flats_data.extend(flats)
 
     return flats_data
 
 
+def get_flats(
+    first_index: int, last_index: int, sleep: float, max_retries: int
+) -> list[Flat]:
+    indexes = list(range(first_index, last_index + 1))
+    return get_flats_indexes(indexes, sleep, max_retries)
+
+
 def main():
     settings = {
-        "last_index": 8,
+        "first_index": 1,
+        "last_index": 7,
         "sleep": 2,
+        "max_retries": 3,
     }
     logger.info({"event": "Start", "settings": settings})
     flats = get_flats(**settings)
